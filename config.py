@@ -22,16 +22,16 @@ MAX_TRADES_TOTAL  = 2      # Max concurrent open trades across all symbols
 DAILY_LOSS_LIMIT  = 0.02   # Halt trading at 2% daily drawdown
 DD_CIRCUIT_BREAK  = 0.06   # Halt trading at 6% drawdown from equity peak
 COOLDOWN_MINUTES  = 45     # Wait after a trade closes before re-entering same symbol
-MIN_RR            = 0.5    # Minimum reward:risk ratio — skip trade if not met
+MIN_RR            = 1.4    # Minimum reward:risk ratio (slightly below TP/SL ratio to allow for slippage)
 PARTIAL_CLOSE_R   = 1.0    # Close 50% of position when trade reaches 1R profit
 
 # ==================== SESSION FILTER ====================
-# London/NY overlap (highest quality moves): 13:00–17:00 UTC
-SESSION_START_UTC = 13
-SESSION_END_UTC   = 17
+# London open through NY close (highest quality moves): 08:00–20:00 UTC
+SESSION_START_UTC = 8
+SESSION_END_UTC   = 20
 
 # ==================== MODEL ====================
-TRAIN_EPOCHS        = 50
+TRAIN_EPOCHS        = 20
 CONFIDENCE_THRESH   = 0.68   # Min ensemble confidence to enter a trade
 CONFIDENCE_FLOOR    = 0.58   # Alert if rolling avg confidence drops below this
 REPLAY_BUFFER_SIZE  = 100    # Max samples in online-learning replay buffer

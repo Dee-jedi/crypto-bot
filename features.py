@@ -9,11 +9,13 @@ logger = logging.getLogger(__name__)
 # All features fed to the model. Order matters for scaler persistence.
 FEAT_COLS = [
     'Open', 'High', 'Low', 'Close', 'Volume',
-    'ATR', 'RSI', 'EMA20', 'EMA50', 'EMA200',
+    'ATR', 'RSI', 'EMA9', 'EMA21', 'EMA20', 'EMA50', 'EMA200',
     'ADX', 'PlusDI', 'MinusDI',
     'ATR_Pct', 'EMA50_Slope', 'Momentum',
     'CVD_Delta', 'OI_Delta', 'FundingRate',
     'Price_EMA50_Dist', 'Price_EMA200_Dist',
+    'BB_Upper', 'BB_Lower', 'BB_Width', 'BB_Pct',
+    'VWAP',
     'InSession', 'Regime',
 ]
 
@@ -72,6 +74,32 @@ def _atr_percentile(atr_series, period=100):
     return atr_series.rolling(period).rank(pct=True)
 
 
+def _bollinger_bands(df, period=20, std_dev=2.0):
+    """
+    Bollinger Bands: SMA +/- N standard deviations.
+    Price outside bands = statistically overextended.
+    """
+    sma = df['Close'].rolling(period).mean()
+    std = df['Close'].rolling(period).std()
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    width = (upper - lower) / (sma + 1e-10)  # Normalized band width
+    pct   = (df['Close'] - lower) / (upper - lower + 1e-10)  # 0=lower band, 1=upper band
+    return upper, lower, width, pct
+
+
+def _vwap(df):
+    """
+    Session-based VWAP proxy using rolling 96-bar window (24h on 15m).
+    Acts as institutional fair value level for mean-reversion.
+    """
+    typical_price = (df['High'] + df['Low'] + df['Close']) / 3.0
+    vol = df['Volume']
+    cum_tp_vol = (typical_price * vol).rolling(96).sum()
+    cum_vol    = vol.rolling(96).sum()
+    return cum_tp_vol / (cum_vol + 1e-10)
+
+
 # ==================== REGIME ====================
 
 def classify_regime(row):
@@ -102,6 +130,8 @@ def build_features(df, funding_rate=0.0, oi_df=None):
     # --- Price-based ---
     d['ATR']         = _atr(d)
     d['RSI']         = _rsi(d)
+    d['EMA9']        = d['Close'].ewm(span=9).mean()
+    d['EMA21']       = d['Close'].ewm(span=21).mean()
     d['EMA20']       = d['Close'].ewm(span=20).mean()
     d['EMA50']       = d['Close'].ewm(span=50).mean()
     d['EMA200']      = d['Close'].ewm(span=200).mean()
@@ -117,6 +147,12 @@ def build_features(df, funding_rate=0.0, oi_df=None):
     # --- Distance from EMAs (normalised by ATR) ---
     d['Price_EMA50_Dist']  = (d['Close'] - d['EMA50'])  / (d['ATR'] + 1e-10)
     d['Price_EMA200_Dist'] = (d['Close'] - d['EMA200']) / (d['ATR'] + 1e-10)
+
+    # --- Bollinger Bands ---
+    d['BB_Upper'], d['BB_Lower'], d['BB_Width'], d['BB_Pct'] = _bollinger_bands(d)
+
+    # --- VWAP proxy ---
+    d['VWAP'] = _vwap(d)
 
     # --- CVD ---
     cvd          = compute_cvd(d)
@@ -147,7 +183,16 @@ def build_features(df, funding_rate=0.0, oi_df=None):
 # ==================== BIAS (higher timeframe) ====================
 
 def htf_bias(df_1h):
-    """Returns 'BULL' or 'BEAR' based on 1h EMA cross."""
+    """
+    Returns 'BULL', 'BEAR', or 'NEUTRAL' based on multi-EMA alignment.
+    All three EMAs must be stacked in order for a directional bias.
+    NEUTRAL = mixed/transitional → skip trading.
+    """
+    ema20  = df_1h['EMA20'].iloc[-1]
     ema50  = df_1h['EMA50'].iloc[-1]
     ema200 = df_1h['EMA200'].iloc[-1]
-    return 'BULL' if ema50 > ema200 else 'BEAR'
+    if ema20 > ema50 > ema200:
+        return 'BULL'
+    elif ema20 < ema50 < ema200:
+        return 'BEAR'
+    return 'NEUTRAL'

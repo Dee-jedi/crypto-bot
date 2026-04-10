@@ -127,21 +127,35 @@ class EnsembleModel:
         ])
         y_flat = y[SEQ_LEN:]
 
-        # ---- Train LSTM ----
+        # ---- Train LSTM (mini-batch to avoid OOM) ----
         logger.info("Training LSTM...")
         self.lstm.train()
+        batch_size = 256
+        n_samples = len(Xs)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.lstm_opt, T_max=TRAIN_EPOCHS
         )
         for epoch in range(TRAIN_EPOCHS):
-            self.lstm_opt.zero_grad()
-            loss = nn.CrossEntropyLoss()(self.lstm(Xs), ys_seq)
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.lstm.parameters(), 1.0)
-            self.lstm_opt.step()
+            indices = torch.randperm(n_samples)
+            epoch_loss = 0.0
+            n_batches = 0
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                idx = indices[start:end]
+                batch_x = Xs[idx]
+                batch_y = ys_seq[idx]
+
+                self.lstm_opt.zero_grad()
+                loss = nn.CrossEntropyLoss()(self.lstm(batch_x), batch_y)
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.lstm.parameters(), 1.0)
+                self.lstm_opt.step()
+                epoch_loss += loss.item()
+                n_batches += 1
             scheduler.step()
             if (epoch + 1) % 10 == 0:
-                logger.info(f"  LSTM epoch {epoch+1}/{TRAIN_EPOCHS} | loss {loss.item():.4f}")
+                avg_loss = epoch_loss / max(n_batches, 1)
+                logger.info(f"  LSTM epoch {epoch+1}/{TRAIN_EPOCHS} | loss {avg_loss:.4f}")
 
         # ---- Train XGBoost ----
         if self.xgb is not None:

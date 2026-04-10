@@ -62,21 +62,37 @@ def build_labels(df, tp_mult=2.0, sl_mult=1.0, lookahead=12):
     return np.array(labels)
 
 
-def optimize_multipliers(df):
+def optimize_multipliers(df, lookahead=24, min_rr=1.5):
     """
     Grid search over TP/SL multipliers evaluating both long AND short
     directions independently on the same historical data.
-    Returns the (tp_mult, sl_mult) pair with the highest total R-multiple.
+    Skips TP/SL combos that don't meet the min R:R ratio.
+
+    Scoring prioritizes WIN RATE over raw R-multiple:
+      score = win_rate * avg_win_r  -  loss_rate * avg_loss_r
+
+    This avoids choosing combos with 10% win rate and huge wins
+    that are unrealistic in live trading.
+
+    Returns the (tp_mult, sl_mult) pair with the highest score.
     """
-    best        = (2.0, 1.0)
+    best        = (2.0, 1.5)
     best_score  = -999.0
 
-    print("Optimising TP/SL multipliers (bidirectional)...")
+    print(f"Optimising TP/SL multipliers (lookahead={lookahead}, min_rr={min_rr})...")
 
+    # Wider SL range: research shows 2.0-2.5x ATR is the sweet spot for 15m crypto
     for tp in [1.5, 2.0, 2.5, 3.0]:
-        for sl in [0.5, 1.0, 1.5]:
-            total = 0.0
-            n     = len(df) - 12
+        for sl in [1.0, 1.5, 2.0, 2.5]:
+            # Skip combos that can't pass MIN_RR
+            if tp / sl < min_rr:
+                continue
+
+            wins   = 0
+            losses = 0
+            win_r  = 0.0
+            loss_r = 0.0
+            n      = len(df) - lookahead
 
             for i in range(n):
                 entry = df['Close'].iloc[i]
@@ -90,7 +106,7 @@ def optimize_multipliers(df):
                 long_r  = 0.0
                 short_r = 0.0
 
-                for j in range(1, 13):
+                for j in range(1, lookahead + 1):
                     h = df['High'].iloc[i + j]
                     l = df['Low'].iloc[i + j]
 
@@ -109,11 +125,34 @@ def optimize_multipliers(df):
                     if long_r != 0.0 and short_r != 0.0:
                         break
 
-                total += long_r + short_r
+                # Count wins and losses for both directions
+                for r in [long_r, short_r]:
+                    if r > 0:
+                        wins += 1
+                        win_r += r
+                    elif r < 0:
+                        losses += 1
+                        loss_r += abs(r)
 
-            if total > best_score:
-                best_score = total
+            total_trades = wins + losses
+            if total_trades == 0:
+                continue
+
+            win_rate = wins / total_trades
+            avg_win  = win_r / max(wins, 1)
+            avg_loss = loss_r / max(losses, 1)
+
+            # Score that rewards win rate: expectancy per trade
+            # Expectancy = (win_rate * avg_win) - (loss_rate * avg_loss)
+            expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+            score = expectancy * total_trades  # Scale by trade count
+
+            if score > best_score:
+                best_score = score
                 best       = (tp, sl)
+                print(f"    TP:{tp} SL:{sl} | WR:{win_rate:.1%} | "
+                      f"AvgW:{avg_win:.2f}R AvgL:{avg_loss:.2f}R | "
+                      f"Expectancy:{expectancy:.3f}R | Score:{score:.1f}")
 
-    print(f"  Best → TP: {best[0]}x ATR | SL: {best[1]}x ATR | Score: {best_score:.1f}R")
+    print(f"  Best -> TP: {best[0]}x ATR | SL: {best[1]}x ATR | Score: {best_score:.1f}")
     return best

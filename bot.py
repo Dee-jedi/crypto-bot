@@ -280,10 +280,12 @@ def attempt_entry(sym, df_15m, df_1h, model, tp_sl, risk_mgr,
     price            = df_15m['Close'].iloc[-1]
     atr              = df_15m['ATR'].iloc[-1]
     rsi              = df_15m['RSI'].iloc[-1]
+    adx              = df_15m['ADX'].iloc[-1]
+    regime           = int(df_15m['Regime'].iloc[-1])
     ts               = df_15m.index[-1]
     hour_utc         = ts.hour
 
-    # ---- Time filter: London/NY overlap only ----
+    # ---- Time filter: London open → NY close ----
     if not (SESSION_START_UTC <= hour_utc < SESSION_END_UTC):
         return False
 
@@ -292,8 +294,18 @@ def attempt_entry(sym, df_15m, df_1h, model, tp_sl, risk_mgr,
     if cd and ts < cd:
         return False
 
-    # ---- HTF bias ----
+    # ---- Regime filter: only trade trending markets ----
+    if regime != 1:
+        return False
+
+    # ---- ADX filter: need minimum trend strength ----
+    if adx < 20:
+        return False
+
+    # ---- HTF bias (now supports NEUTRAL → skip) ----
     bias = htf_bias(df_1h)
+    if bias == 'NEUTRAL':
+        return False
 
     # ---- ICT signals ----
     window              = df_15m.iloc[-80:]
@@ -308,7 +320,6 @@ def attempt_entry(sym, df_15m, df_1h, model, tp_sl, risk_mgr,
 
     # ---- ML signal ----
     pred, conf, x_tensor = model.predict(df_15m)
-    regime               = int(df_15m['Regime'].iloc[-1])
 
     # Confidence gate
     if conf < CONFIDENCE_THRESH:
@@ -325,7 +336,7 @@ def attempt_entry(sym, df_15m, df_1h, model, tp_sl, risk_mgr,
         pred == 1
         and long_s >= 3
         and bias == 'BULL'
-        and rsi < 65
+        and rsi < 55
         and probs_ok(conf, 'long')
     ):
         sl_p = price - sl_mult * atr
@@ -339,7 +350,7 @@ def attempt_entry(sym, df_15m, df_1h, model, tp_sl, risk_mgr,
         if lot <= 0:
             return False
 
-        logger.info(f"LONG setup detected | {sym} | ICT: {long_s}/5 | Conf: {conf:.0%}")
+        logger.info(f"LONG setup detected | {sym} | ICT: {long_s}/5 | Conf: {conf:.0%} | ADX: {adx:.0f} | RSI: {rsi:.0f}")
         order_id, fill_price = place_limit_entry(exchange, sym, 'buy', lot, price, atr)
 
         if order_id and wait_for_fill(exchange, sym, order_id):
@@ -356,7 +367,7 @@ def attempt_entry(sym, df_15m, df_1h, model, tp_sl, risk_mgr,
         pred == 0
         and short_s >= 3
         and bias == 'BEAR'
-        and rsi > 35
+        and rsi > 45
         and probs_ok(conf, 'short')
     ):
         sl_p = price + sl_mult * atr
@@ -370,7 +381,7 @@ def attempt_entry(sym, df_15m, df_1h, model, tp_sl, risk_mgr,
         if lot <= 0:
             return False
 
-        logger.info(f"SHORT setup detected | {sym} | ICT: {short_s}/5 | Conf: {conf:.0%}")
+        logger.info(f"SHORT setup detected | {sym} | ICT: {short_s}/5 | Conf: {conf:.0%} | ADX: {adx:.0f} | RSI: {rsi:.0f}")
         order_id, fill_price = place_limit_entry(exchange, sym, 'sell', lot, price, atr)
 
         if order_id and wait_for_fill(exchange, sym, order_id):
