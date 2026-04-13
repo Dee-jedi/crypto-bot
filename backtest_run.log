@@ -1,0 +1,70 @@
+2026-04-10 16:00:12,846 - __main__ - INFO - Connected to Binance production API for historical data (markets not loaded)
+2026-04-10 16:00:12,848 - __main__ - INFO - Loading fallback cached data: data/cache\ETHUSDT_15m_12m.csv
+2026-04-10 16:00:13,607 - __main__ - INFO - Loading fallback cached data: data/cache\ETHUSDT_1h_12m.csv
+2026-04-10 16:00:13,735 - __main__ - INFO - Using dummy OI data for ETH/USDT (API restricted)
+2026-04-10 16:00:30,854 - __main__ - INFO - Building features for 15m data...
+
+============================================================
+  BACKTEST v3 - ICT + EMA/BB/VWAP Filter Stack
+============================================================
+  Data period   : 6 months
+  Train/Test    : 70% / 30%
+  Session       : 08:00 - 20:00 UTC
+  Confluence    : >=1/5 ICT signals
+  RSI           : Long <65 | Short >35
+  ADX minimum   : 15
+  EMA confirm   : OFF
+  BB filter     : Long<90% Short>10%
+  VWAP filter   : <4.0 ATR from VWAP
+  ML model      : ON (>=20%)
+  MIN R:R       : 1.4
+  LOOKAHEAD     : 36 bars (9h on 15m)
+  Partial close : 0% at 1R
+  Timeframes    : 15m (signal), 1h (bias)
+  Symbols       : ETH/USDT
+============================================================
+
+
+************************************************************
+  Processing ETH/USDT
+************************************************************
+
+Traceback (most recent call last):
+  File "C:\Users\Aminat\crypto-bot\backtest_improved.py", line 635, in <module>
+    df_15m = build_features(df_15m, funding_rate=funding_rate, oi_df=oi)
+  File "C:\Users\Aminat\crypto-bot\features.py", line 163, in build_features
+    oi_aligned  = oi_df['OI'].reindex(d.index, method='ffill')
+  File "C:\Users\Aminat\crypto-bot\venv\Lib\site-packages\pandas\core\series.py", line 5525, in reindex
+    return super().reindex(
+           ~~~~~~~~~~~~~~~^
+        index=index,
+        ^^^^^^^^^^^^
+    ...<5 lines>...
+        copy=copy,
+        ^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\Aminat\crypto-bot\venv\Lib\site-packages\pandas\core\generic.py", line 5476, in reindex
+    return self._reindex_axes(
+           ~~~~~~~~~~~~~~~~~~^
+        axes, level, limit, tolerance, method, fill_value
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ).__finalize__(self, method="reindex")
+    ^
+  File "C:\Users\Aminat\crypto-bot\venv\Lib\site-packages\pandas\core\generic.py", line 5498, in _reindex_axes
+    new_index, indexer = ax.reindex(
+                         ~~~~~~~~~~^
+        labels, level=level, limit=limit, tolerance=tolerance, method=method
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\Aminat\crypto-bot\venv\Lib\site-packages\pandas\core\indexes\base.py", line 4246, in reindex
+    indexer = self.get_indexer(
+        target, method=method, limit=limit, tolerance=tolerance
+    )
+  File "C:\Users\Aminat\crypto-bot\venv\Lib\site-packages\pandas\core\indexes\base.py", line 3736, in get_indexer
+    return self._get_indexer_non_comparable(target, method=method, unique=True)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Aminat\crypto-bot\venv\Lib\site-packages\pandas\core\indexes\base.py", line 6401, in _get_indexer_non_comparable
+    raise TypeError(f"Cannot compare dtypes {self.dtype} and {other_dtype}")
+TypeError: Cannot compare dtypes int64 and datetime64[us, UTC]

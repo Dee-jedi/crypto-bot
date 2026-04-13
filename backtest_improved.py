@@ -44,31 +44,31 @@ logger = logging.getLogger(__name__)
 
 # ==================== BACKTEST PARAMETERS ====================
 
-USE_ML          = False    # Toggle ML model on/off (False = pure ICT signals)
+USE_ML          = True     # Toggle ML model on/off (True = ML-enhanced ICT signals)
 BACKTEST_SYMBOLS = ['ETH/USDT']  # Override symbols for backtest (BTC score was -197R)
 
 SLIPPAGE        = 0.0005   # 0.05% per side
 LOOKAHEAD       = 36       # 36 bars x 15m = 9 hours (wider SL needs more time)
 CONF_THRESH_BT  = 0.20     # ML confidence threshold (only used when USE_ML=True)
 TRAIN_RATIO     = 0.70     # 70% train, 30% out-of-sample test
-MIN_CONFLUENCE  = 2        # Lowered back: EMA/BB/VWAP filters now provide quality control
-RSI_LONG_MAX    = 60       # Max RSI for long entries (relaxed from 55)
-RSI_SHORT_MIN   = 40       # Min RSI for short entries (relaxed from 45)
-ADX_MIN         = 18       # Minimum ADX for trending market (relaxed from 20)
+MIN_CONFLUENCE  = 1        # Relaxed: EMA/BB/VWAP filters now provide quality control
+RSI_LONG_MAX    = 65       # Max RSI for long entries (relaxed from 60)
+RSI_SHORT_MIN   = 35       # Min RSI for short entries (relaxed from 40)
+ADX_MIN         = 15       # Minimum ADX for trending market (relaxed from 18)
 PARTIAL_CLOSE   = 0.0      # DISABLED: partial close was capping avg win at 0.38R
 
 # NEW: EMA crossover confirmation (9/21 EMA must agree with trade direction)
-USE_EMA_CONFIRM = True
+USE_EMA_CONFIRM = False    # Disabled: redundant with HTF bias filter
 # NEW: Bollinger Band overextension filter (skip entries at band extremes)
 USE_BB_FILTER   = True
-BB_LONG_MAX     = 0.85     # Skip longs if price > 85% of BB range (overextended)
-BB_SHORT_MIN    = 0.15     # Skip shorts if price < 15% of BB range (overextended)
+BB_LONG_MAX     = 0.90     # Skip longs if price > 90% of BB range (relaxed from 85%)
+BB_SHORT_MIN    = 0.10     # Skip shorts if price < 10% of BB range (relaxed from 15%)
 # NEW: VWAP proximity filter (entries near VWAP have better mean-reversion edge)
 USE_VWAP_FILTER = True
-VWAP_MAX_DIST   = 3.0      # Max distance from VWAP in ATR units
+VWAP_MAX_DIST   = 4.0      # Max distance from VWAP in ATR units (relaxed from 3.0)
 
 # Historical data settings
-BACKTEST_MONTHS = 12
+BACKTEST_MONTHS = 6   # Reduced from 12 for faster testing
 CACHE_DIR       = 'data/cache'
 
 
@@ -83,8 +83,9 @@ def connect_production():
         'options': {'defaultType': 'future'},
         'enableRateLimit': True,
     })
-    ex.load_markets()
-    logger.info("Connected to Binance production API for historical data")
+    # Skip load_markets() to avoid geo-restriction errors
+    # ex.load_markets()
+    logger.info("Connected to Binance production API for historical data (markets not loaded)")
     return ex
 
 
@@ -164,7 +165,7 @@ def fetch_historical_range(exchange, symbol, timeframe, start_date, end_date=Non
 
 
 def get_cached_or_fetch(exchange, symbol, timeframe, months=12):
-    """Check cache, fetch if missing or expired."""
+    """Check cache, use cached data only (skip API calls due to geo-restrictions)."""
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     cache_file = os.path.join(
@@ -173,41 +174,38 @@ def get_cached_or_fetch(exchange, symbol, timeframe, months=12):
     )
 
     if os.path.exists(cache_file):
-        cache_age_hours = (datetime.now().timestamp() - os.path.getmtime(cache_file)) / 3600
-        if cache_age_hours < 24:
-            logger.info(f"Loading cached data: {cache_file} (age: {cache_age_hours:.1f}h)")
-            df = pd.read_csv(cache_file, index_col='time', parse_dates=True)
-            return df
-        else:
-            logger.info(f"Cache expired (age: {cache_age_hours:.1f}h), fetching fresh data")
+        logger.info(f"Loading cached data: {cache_file}")
+        df = pd.read_csv(cache_file, index_col='time', parse_dates=True)
+        return df
 
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=months * 30)
-    df = fetch_historical_range(exchange, symbol, timeframe, start_date, end_date)
-    df.to_csv(cache_file)
-    logger.info(f"Cached data saved: {cache_file}")
-    return df
+    # Fallback: use a larger cached dataset if available
+    pattern = f"{symbol.replace('/', '')}_{timeframe}_*m.csv"
+    candidates = [f for f in os.listdir(CACHE_DIR) if f.startswith(f"{symbol.replace('/', '')}_{timeframe}_") and f.endswith('.csv')]
+    if candidates:
+        candidates.sort(reverse=True)
+        for candidate in candidates:
+            candidate_path = os.path.join(CACHE_DIR, candidate)
+            logger.info(f"Loading fallback cached data: {candidate_path}")
+            df = pd.read_csv(candidate_path, index_col='time', parse_dates=True)
+            # Trim to requested months if the fallback dataset is larger
+            if months < int(candidate.split('_')[-1].replace('m.csv', '')):
+                cutoff = datetime.now(timezone.utc) - timedelta(days=months * 30)
+                df = df[df.index >= cutoff]
+            return df
+
+    raise FileNotFoundError(
+        f"No cached data found for {symbol} {timeframe}. Please run backtest when API is accessible."
+    )
 
 
 def fetch_open_interest_historical(exchange, symbol, tf='15m', months=12):
-    """Fetch historical Open Interest data (capped at 90 days by Binance)."""
-    try:
-        days = min(months * 30, 90)
-        limit = int(days * 24 * (60 / int(tf.replace('m', '').replace('h', ''))))
-
-        logger.info(f"Fetching {days} days of OI data for {symbol}")
-        oi_data = exchange.fetch_open_interest_history(symbol, tf, limit=min(limit, 500))
-
-        if not oi_data:
-            return None
-
-        df = pd.DataFrame(oi_data)
-        df['time'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-        df.set_index('time', inplace=True)
-        return df[['openInterestAmount']].rename(columns={'openInterestAmount': 'OI'})
-    except Exception as e:
-        logger.warning(f"OI fetch failed ({symbol}): {e}")
-        return None
+    """Return dummy OI data to avoid API calls (for backtesting with cached data)."""
+    logger.info(f"Using dummy OI data for {symbol} (API restricted)")
+    # Return a DataFrame with constant OI values
+    dummy_oi = pd.DataFrame({
+        'OI': [1000000.0] * 1000  # Constant OI for backtesting
+    })
+    return dummy_oi
 
 
 # ==================== BACKTESTER ====================
