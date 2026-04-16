@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from data_feed import compute_cvd
 from config import SESSION_START_UTC, SESSION_END_UTC
+from ict import liquidity_sweep, fvg
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,8 +16,8 @@ FEAT_COLS = [
     'CVD_Delta', 'OI_Delta', 'FundingRate',
     'Price_EMA50_Dist', 'Price_EMA200_Dist',
     'BB_Upper', 'BB_Lower', 'BB_Width', 'BB_Pct',
-    'VWAP',
-    'InSession', 'Regime',
+    'VWAP', 'InSession', 'Regime',
+    'GapUp', 'GapDown', 'SweptLow', 'SweptHigh', # ICT Signals
 ]
 
 
@@ -150,6 +151,7 @@ def build_features(df, funding_rate=0.0, oi_df=None):
 
     # --- Bollinger Bands ---
     d['BB_Upper'], d['BB_Lower'], d['BB_Width'], d['BB_Pct'] = _bollinger_bands(d)
+    d['BB_Width_SMA20'] = d['BB_Width'].rolling(20).mean() # Baseline for 'Squeeze' detection
 
     # --- VWAP proxy ---
     d['VWAP'] = _vwap(d)
@@ -172,6 +174,22 @@ def build_features(df, funding_rate=0.0, oi_df=None):
     d['InSession'] = d.index.hour.isin(
         range(SESSION_START_UTC, SESSION_END_UTC)
     ).astype(float)
+
+    # --- ICT Signals (Rolling 5-bar Confluence) ---
+    # We use a rolling apply or a loop to mark if a signal occurred recently
+    d['GapUp']    = False
+    d['GapDown']  = False
+    d['SweptLow'] = False
+    d['SweptHigh'] = False
+    
+    for i in range(5, len(d)):
+        window = d.iloc[i-5:i+1]
+        gu, gd = fvg(window)
+        sh, sl = liquidity_sweep(window)
+        d.iloc[i, d.columns.get_loc('GapUp')]    = gu
+        d.iloc[i, d.columns.get_loc('GapDown')]  = gd
+        d.iloc[i, d.columns.get_loc('SweptLow')] = sl
+        d.iloc[i, d.columns.get_loc('SweptHigh')] = sh
 
     # --- Regime label ---
     d.dropna(inplace=True)

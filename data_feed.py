@@ -10,19 +10,39 @@ logger = logging.getLogger(__name__)
 # ==================== CONNECTION ====================
 
 def connect():
-    ex = ccxt.binance({
+    """
+    Connects to the Binance Futures API. 
+    Optimized for the modern Demo-FAPI endpoint (Dashboard balance trading).
+    """
+    params = {
         'apiKey': API_KEY,
         'secret': API_SECRET,
-        'options': {'defaultType': 'future'},
-    })
+        'options': {
+            'defaultType': 'future',
+            'fetchCurrencies': False
+        },
+    }
+    
+    ex = ccxt.binance(params)
+    
     if TESTNET:
-        try:
-            ex.set_sandbox_mode(True)
-        except ccxt.NotSupported as e:
-            logger.error("Binance Futures Testnet API is completely discontinued by Binance.")
-            logger.error("You MUST set TESTNET = False in config.py and use extremely cautious risk percentages to test live.")
-            raise SystemExit("Exiting due to Binance terminating their testnet API.")
-    ex.load_markets()
+        logger.info("[CONNECTION] Activating Modern Demo-FAPI Hub...")
+        # Point to the new Demo Mode API endpoint
+        demo_url = 'https://demo-fapi.binance.com/fapi'
+        ex.urls['api']['fapiPublic']  = demo_url
+        ex.urls['api']['fapiPrivate'] = demo_url
+        # Force the Demo Mode headers
+        ex.headers = {
+            'X-MBX-APIKEY': API_KEY
+        }
+            
+    try:
+        ex.load_markets()
+        logger.info(f"[CONNECTION] Connected to {'Demo Mode' if TESTNET else 'Production'}")
+    except Exception as e:
+        logger.error(f"Connection failed: {e}")
+        raise
+        
     return ex
 
 

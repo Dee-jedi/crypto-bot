@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def build_labels(df, tp_mult=2.0, sl_mult=1.0, lookahead=12):
+def build_labels(df, tp_mult=2.0, sl_mult=1.0, lookahead=96):
     """
     Labels each bar as:
         1  = long opportunity  (long TP hit before long SL, short direction fails)
@@ -81,9 +81,9 @@ def optimize_multipliers(df, lookahead=24, min_rr=1.5):
 
     print(f"Optimising TP/SL multipliers (lookahead={lookahead}, min_rr={min_rr})...")
 
-    # Wider SL range: research shows 2.0-2.5x ATR is the sweet spot for 15m crypto
-    for tp in [1.5, 2.0, 2.5, 3.0]:
-        for sl in [1.0, 1.5, 2.0, 2.5]:
+    # Wider grid with finer granularity for 15m crypto
+    for tp in [1.5, 1.8, 2.0, 2.5, 3.0, 3.5]:
+        for sl in [1.0, 1.2, 1.5, 1.8, 2.0, 2.5]:
             # Skip combos that can't pass MIN_RR
             if tp / sl < min_rr:
                 continue

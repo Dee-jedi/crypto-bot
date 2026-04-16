@@ -111,16 +111,13 @@ def order_block(df):
 def confluence_score(bias, bos_up, bos_down, swept_high, swept_low,
                      gap_up, gap_down, bull_ob, bear_ob, price):
     """
-    Returns (long_score, short_score) as integers 0–5.
+    Returns (long_score, short_score) as integers 0–4.
     Higher = more ICT confluence.
+    NOTE: Bias is NOT counted here (it's already checked in entry logic).
+    Signals: BOS, Liquidity Sweep, FVG, Order Block.
     """
     long_score  = 0
     short_score = 0
-
-    if bias == 'BULL':
-        long_score  += 1
-    else:
-        short_score += 1
 
     if bos_up:
         long_score  += 1

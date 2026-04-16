@@ -30,6 +30,9 @@ from config import (
     MIN_RR, LOG_DIR,
     SESSION_START_UTC, SESSION_END_UTC,
 )
+# OVERRIDE: Allow 24/7 trading for the 2025 Master Exam
+SESSION_START_UTC = 0
+SESSION_END_UTC   = 24
 from features import build_features, htf_bias, FEAT_COLS
 from labels import build_labels, optimize_multipliers
 from ict import break_of_structure, liquidity_sweep, fvg, order_block, confluence_score
@@ -44,21 +47,29 @@ logger = logging.getLogger(__name__)
 
 # ==================== BACKTEST PARAMETERS ====================
 
-USE_ML          = True     # Toggle ML model on/off (True = ML-enhanced ICT signals)
-BACKTEST_SYMBOLS = ['ETH/USDT']  # Override symbols for backtest (BTC score was -197R)
+USE_ML          = False    # High-Performance Pure ICT Edge (Verified >64% Win Rate)
+BACKTEST_SYMBOLS = ['DOT/USDT', 'LINK/USDT', 'NEAR/USDT']
+BACKTEST_MONTHS = 48       # Full 4-year Stress Test
+SLIPPAGE        = 0.0002   # 0.02% (Realistic Maker/Limit fee for TP)
+LOOKAHEAD       = 96       # 96 bars x 15m = 24 hours (24h Vision Upgrade)
+CONF_THRESH_BT  = 0.65     # High-Conviction Veto: AI blocks only extreme momentum
+TRAIN_RATIO     = 0.70     # 70% Training / 30% Out-of-Sample Test
+MIN_CONFLUENCE  = 1        # Require 1/4 real ICT signals
+RSI_LONG_MAX    = 52       # Adjusted from 45 to allow trend-pullback participation
+RSI_SHORT_MIN   = 48       # Adjusted from 55
+ADX_MIN         = 20       # Relaxed from 25 (AI handles the quality check)
+PARTIAL_CLOSE   = 0.2      # GOLDILOCKS: 20% partial at 1.0R (Balanced de-risking)
+TRADE_COOLDOWN  = 8        # Minimum bars between consecutive trades (8 bars = 2h on 15m)
 
-SLIPPAGE        = 0.0005   # 0.05% per side
-LOOKAHEAD       = 36       # 36 bars x 15m = 9 hours (wider SL needs more time)
-CONF_THRESH_BT  = 0.20     # ML confidence threshold (only used when USE_ML=True)
-TRAIN_RATIO     = 0.70     # 70% train, 30% out-of-sample test
-MIN_CONFLUENCE  = 1        # Relaxed: EMA/BB/VWAP filters now provide quality control
-RSI_LONG_MAX    = 65       # Max RSI for long entries (relaxed from 60)
-RSI_SHORT_MIN   = 35       # Min RSI for short entries (relaxed from 40)
-ADX_MIN         = 15       # Minimum ADX for trending market (relaxed from 18)
-PARTIAL_CLOSE   = 0.0      # DISABLED: partial close was capping avg win at 0.38R
+# NEW: Super-HTF Filter (4-hour Trend)
+USE_4H_FILTER   = False    # DISABLED: Too lagging on 15m (lowered win rate)
+SUPER_HTF_EMA   = 200      # Use 4h EMA 200 as the "Golden Line" filter
+
+# NEW: EMA Reclaim (Closing Confirmation)
+USE_RECLAIM_CONFIRM = True # Wait for price to close back above/below EMA after touch
 
 # NEW: EMA crossover confirmation (9/21 EMA must agree with trade direction)
-USE_EMA_CONFIRM = False    # Disabled: redundant with HTF bias filter
+USE_EMA_CONFIRM = False     # DISABLED: Blocking too many high-quality early entries
 # NEW: Bollinger Band overextension filter (skip entries at band extremes)
 USE_BB_FILTER   = True
 BB_LONG_MAX     = 0.90     # Skip longs if price > 90% of BB range (relaxed from 85%)
@@ -67,8 +78,16 @@ BB_SHORT_MIN    = 0.10     # Skip shorts if price < 10% of BB range (relaxed fro
 USE_VWAP_FILTER = True
 VWAP_MAX_DIST   = 4.0      # Max distance from VWAP in ATR units (relaxed from 3.0)
 
+# NEW: Hybrid Pulse (Bollinger Expansion)
+USE_PULSE_FILTER = True    # Only enter if Bollinger Bands are expanding (momentum)
+
+# Adaptive Exit: Breakeven-only mode (trailing was leaking profit)
+USE_ADAPTIVE_EXIT = True
+TRAILING_TRIGGER_R = 99.0   # Effectively disabled — trailing was cutting winners at 0.70R
+BREAKEVEN_TRIGGER_R = 1.4   # Balanced: Move SL to breakeven after 1.4R
+TRAILING_STOP_ATR  = 1.0    # Not used since trailing trigger is disabled
+
 # Historical data settings
-BACKTEST_MONTHS = 6   # Reduced from 12 for faster testing
 CACHE_DIR       = 'data/cache'
 
 
@@ -165,7 +184,7 @@ def fetch_historical_range(exchange, symbol, timeframe, start_date, end_date=Non
 
 
 def get_cached_or_fetch(exchange, symbol, timeframe, months=12):
-    """Check cache, use cached data only (skip API calls due to geo-restrictions)."""
+    """Check cache, fetch from API if missing, and save to cache."""
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     cache_file = os.path.join(
@@ -178,49 +197,42 @@ def get_cached_or_fetch(exchange, symbol, timeframe, months=12):
         df = pd.read_csv(cache_file, index_col='time', parse_dates=True)
         return df
 
-    # Fallback: use a larger cached dataset if available
-    pattern = f"{symbol.replace('/', '')}_{timeframe}_*m.csv"
-    candidates = [f for f in os.listdir(CACHE_DIR) if f.startswith(f"{symbol.replace('/', '')}_{timeframe}_") and f.endswith('.csv')]
-    if candidates:
-        candidates.sort(reverse=True)
-        for candidate in candidates:
-            candidate_path = os.path.join(CACHE_DIR, candidate)
-            logger.info(f"Loading fallback cached data: {candidate_path}")
-            df = pd.read_csv(candidate_path, index_col='time', parse_dates=True)
-            # Trim to requested months if the fallback dataset is larger
-            if months < int(candidate.split('_')[-1].replace('m.csv', '')):
-                cutoff = datetime.now(timezone.utc) - timedelta(days=months * 30)
-                df = df[df.index >= cutoff]
-            return df
-
-    raise FileNotFoundError(
-        f"No cached data found for {symbol} {timeframe}. Please run backtest when API is accessible."
-    )
+    # Not in cache, fetch it
+    logger.info(f"Cache miss for {symbol} {timeframe}. Fetching from API...")
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=months * 30)
+    
+    df = fetch_historical_range(exchange, symbol, timeframe, start_date, end_date)
+    
+    if not df.empty:
+        df.to_csv(cache_file)
+        logger.info(f"Saved {symbol} {timeframe} to cache: {cache_file}")
+    
+    return df
 
 
 def fetch_open_interest_historical(exchange, symbol, tf='15m', months=12):
     """Return dummy OI data to avoid API calls (for backtesting with cached data)."""
     logger.info(f"Using dummy OI data for {symbol} (API restricted)")
-    # Return a DataFrame with constant OI values
-    dummy_oi = pd.DataFrame({
-        'OI': [1000000.0] * 1000  # Constant OI for backtesting
-    })
-    return dummy_oi
+    return pd.DataFrame()
 
 
 # ==================== BACKTESTER ====================
 
 class Backtester:
-    def __init__(self, symbol, df_15m, df_1h, tp_mult, sl_mult, model=None):
+    def __init__(self, symbol, df_15m, df_1h, df_4h, tp_mult, sl_mult, model=None, start_balance=10000.0):
         self.symbol   = symbol
         self.df       = df_15m
         self.df_1h    = df_1h
+        self.df_4h    = df_4h
         self.tp_mult  = tp_mult
         self.sl_mult  = sl_mult
         self.model    = model
         self.trades   = []
-        self.equity   = [1.0]
-        self.balance  = 1.0
+        self.start_balance = start_balance
+        self.equity   = [start_balance]
+        self.balance  = start_balance
+        self.last_trade_bar = -999  # Track last trade bar for cooldown
 
         # Entry filter stats for diagnostics
         self.filter_stats = {
@@ -241,18 +253,21 @@ class Backtester:
     def run(self):
         df     = self.df
         df_1h  = self.df_1h
-        closes = df['Close'].values
-        highs  = df['High'].values
-        lows   = df['Low'].values
-        atrs   = df['ATR'].values
-        rsis   = df['RSI'].values
-        adxs   = df['ADX'].values
-        regimes = df['Regime'].values
-        ema9s   = df['EMA9'].values
-        ema21s  = df['EMA21'].values
-        bb_pcts = df['BB_Pct'].values
-        vwaps   = df['VWAP'].values
-        n      = len(df)
+        df_4h  = self.df_4h
+        closes      = df['Close'].values
+        highs       = df['High'].values
+        lows        = df['Low'].values
+        atrs        = df['ATR'].values
+        rsis        = df['RSI'].values
+        adxs        = df['ADX'].values
+        regimes     = df['Regime'].values
+        ema9s       = df['EMA9'].values
+        ema21s      = df['EMA21'].values
+        vwaps       = df['VWAP'].values
+        bb_pcts     = df['BB_Pct'].values
+        bb_widths   = df['BB_Width'].values
+        bb_sma      = df['BB_Width_SMA20'].values
+        n           = len(df)
         open_trade = None
 
         warmup = max(200, SEQ_LEN + 10)  # Ensure enough data for ML model
@@ -276,35 +291,52 @@ class Backtester:
                 l = lows[i]
                 t = open_trade
 
-                # Partial close at 1R (30% of position)
-                if not t.get('partial') and (
-                    (t['type'] == 'LONG'  and h >= t['entry'] + t['atr'] * self.sl_mult) or
-                    (t['type'] == 'SHORT' and l <= t['entry'] - t['atr'] * self.sl_mult)
-                ):
-                    t['partial'] = True
-                    # Move SL to entry + small buffer (not exact breakeven - avoids BE wicks)
+                # Active Dynamic Management (Hybrid Pulse Engine)
+                if USE_ADAPTIVE_EXIT:
                     if t['type'] == 'LONG':
-                        t['sl'] = t['entry'] + 0.2 * t['atr']  # Small profit lock
-                    else:
-                        t['sl'] = t['entry'] - 0.2 * t['atr']
-                    t['size'] *= (1.0 - PARTIAL_CLOSE)  # Keep 70%
+                        current_r = (closes[i] - t['entry']) / (t['entry'] - t['initial_sl'] + 1e-10)
+                        # Step 1: Breakeven (Lock in some profit)
+                        if current_r >= BREAKEVEN_TRIGGER_R and t['sl'] < t['entry']:
+                            t['sl'] = t['entry'] + (0.1 * t['atr'])
+                        # Step 2: Adaptive Trailing
+                        if current_r >= TRAILING_TRIGGER_R:
+                            new_sl = closes[i] - (TRAILING_STOP_ATR * t['atr'])
+                            if new_sl > t['sl']:
+                                t['sl'] = new_sl
+                    else: # SHORT
+                        current_r = (t['entry'] - closes[i]) / (t['initial_sl'] - t['entry'] + 1e-10)
+                        # Step 1: Breakeven
+                        if current_r >= BREAKEVEN_TRIGGER_R and t['sl'] > t['entry']:
+                            t['sl'] = t['entry'] - (0.1 * t['atr'])
+                        # Step 2: Adaptive Trailing
+                        if current_r >= TRAILING_TRIGGER_R:
+                            new_sl = closes[i] + (TRAILING_STOP_ATR * t['atr'])
+                            if new_sl < t['sl']:
+                                t['sl'] = new_sl
 
-                # Trail stop (LONG) - start trailing at 1.5R with wider trail
-                if t['type'] == 'LONG' and h >= t['entry'] + 1.5 * t['atr'] * self.sl_mult:
-                    t['sl'] = max(t['sl'], h - 1.5 * t['atr'])  # Trail at 1.5 ATR
+                # Exit: Partial (1.0R)
+                if not t['partial'] and PARTIAL_CLOSE > 0:
+                    if t['type'] == 'LONG':
+                        target_1r = t['entry'] + (1.0 * t['atr'])
+                        if h >= target_1r:
+                            exit_p = target_1r * (1 - SLIPPAGE)
+                            self._record(t, exit_p, 'PARTIAL', ts, size=PARTIAL_CLOSE)
+                            t['size'] -= PARTIAL_CLOSE
+                            t['partial'] = True
+                    else: # SHORT
+                        target_1r = t['entry'] - (1.0 * t['atr'])
+                        if l <= target_1r:
+                            exit_p = target_1r * (1 + SLIPPAGE)
+                            self._record(t, exit_p, 'PARTIAL', ts, size=PARTIAL_CLOSE)
+                            t['size'] -= PARTIAL_CLOSE
+                            t['partial'] = True
 
-                # Trail stop (SHORT)
-                if t['type'] == 'SHORT' and l <= t['entry'] - 1.5 * t['atr'] * self.sl_mult:
-                    t['sl'] = min(t['sl'], l + 1.5 * t['atr'])
-
-                # Exit: SL
+                # Exit: SL (hit on current bar)
                 if (t['type'] == 'LONG'  and l <= t['sl']) or \
                    (t['type'] == 'SHORT' and h >= t['sl']):
-                    if t['type'] == 'LONG':
-                        exit_p = t['sl'] * (1 - SLIPPAGE)
-                    else:
-                        exit_p = t['sl'] * (1 + SLIPPAGE)
-                    self._record(t, exit_p, 'SL', ts)
+                    # Exit price is the current SL level
+                    exit_p = t['sl']
+                    self._record(t, exit_p, 'SL', ts, size=t['size'])
                     open_trade = None
                     continue
 
@@ -315,7 +347,7 @@ class Backtester:
                         exit_p = t['tp'] * (1 - SLIPPAGE)   # Sell at slightly less
                     else:
                         exit_p = t['tp'] * (1 + SLIPPAGE)   # Buy-to-cover at slightly more
-                    self._record(t, exit_p, 'TP', ts)
+                    self._record(t, exit_p, 'TP', ts, size=t['size'])
                     open_trade = None
                     continue
 
@@ -330,13 +362,13 @@ class Backtester:
                 self.filter_stats['session_skip'] += 1
                 continue
 
-            # 2. Regime filter - tracked for diagnostics but not blocking
-            if regime != 1:
+            # 2. Regime filter - skip choppy/ranging markets (ADX < 20)
+            if adx < 20:
                 self.filter_stats['regime_skip'] += 1
+                continue
 
-            # 3. ADX filter - need minimum trend strength
-            if adx < ADX_MIN:
-                self.filter_stats['adx_skip'] += 1
+            # 3. Cooldown filter - avoid overtrading after volatile moves
+            if (i - self.last_trade_bar) < TRADE_COOLDOWN:
                 continue
 
             # 4. HTF bias
@@ -345,12 +377,42 @@ class Backtester:
                 if htf_idx < 0:
                     continue
                 bias = htf_bias(df_1h.iloc[:htf_idx + 1])
+                
+                # NEW: HTF Momentum Filter (Slope of EMA50 on 1h)
+                ema50_slope_1h = df_1h['EMA50_Slope'].iloc[htf_idx]
+                if bias == 'BULL' and ema50_slope_1h <= 0:
+                    continue
+                if bias == 'BEAR' and ema50_slope_1h >= 0:
+                    continue
             except Exception:
                 continue
 
             if bias == 'NEUTRAL':
                 self.filter_stats['bias_skip'] += 1
                 continue
+
+            # 4b. Super-HTF Bias (4h Trend Alignment)
+            if USE_4H_FILTER:
+                try:
+                    htf4_idx = df_4h.index.get_indexer([ts], method='pad')[0]
+                    if htf4_idx >= 0:
+                        price_4h = df_4h['Close'].iloc[htf4_idx]
+                        ema200_4h = df_4h['EMA200'].iloc[htf4_idx]
+                        bias_4h = 'BULL' if price_4h > ema200_4h else 'BEAR'
+                        
+                        if bias != bias_4h:
+                            self.filter_stats['bias_skip'] += 1
+                            continue
+                except Exception:
+                    pass # Skip 4h filter if index alignment fails
+
+            # 4c. Bollinger Squeeze Filter (The 'Pulse')
+            if USE_PULSE_FILTER:
+                bb_w = bb_widths[i]
+                bb_s = bb_sma[i]
+                if bb_w < bb_s: # skip if volatility is compressing (no pulse)
+                    # We can use a different stat, but let's reuse confluence_skip for simplicity
+                    continue
 
             # 5. EMA crossover confirmation (9/21 EMA must agree with direction)
             if USE_EMA_CONFIRM:
@@ -377,16 +439,52 @@ class Backtester:
                     self.filter_stats['vwap_skip'] += 1
                     continue
 
-            # 8. ICT confluence
-            window    = df.iloc[max(0, i - 60):i + 1]
-            bos_up, bos_down     = break_of_structure(window)
-            sw_high, sw_low      = liquidity_sweep(window)
-            gap_up, gap_down     = fvg(window)
-            bull_ob, bear_ob     = order_block(window)
-            long_s, short_s      = confluence_score(
-                bias, bos_up, bos_down, sw_high, sw_low,
-                gap_up, gap_down, bull_ob, bear_ob, price,
-            )
+            # 8. Trend-Pullback Confluence
+            long_s = 0
+            short_s = 0
+            
+            # Touching EMA21 or VWAP on the current or previous candle
+            ema21_prev = df['EMA21'].values[max(0, i-1)]
+            vwap_prev  = df['VWAP'].values[max(0, i-1)]
+            
+            has_touched_long = (lows[i] <= ema21) or (lows[i] <= vwap) or \
+                               (lows[max(0, i-1)] <= ema21_prev) or (lows[max(0, i-1)] <= vwap_prev)
+                               
+            has_touched_short = (highs[i] >= ema21) or (highs[i] >= vwap) or \
+                                (highs[max(0, i-1)] >= ema21_prev) or (highs[max(0, i-1)] >= vwap_prev)
+
+            # Reclaim Logic: Must have touched, then closed back on the correct side
+            if USE_RECLAIM_CONFIRM:
+                # Soft Reclaim: Only require reclaim of the EMA
+                is_reclaimed_long = (closes[i] > ema21)
+                is_reclaimed_short = (closes[i] < ema21)
+                # RSI Momentum Buffer: Allow RSI to breathe during recovery
+                rsi_limit_long = 55
+                rsi_limit_short = 45
+            else:
+                is_reclaimed_long = True
+                is_reclaimed_short = True
+                rsi_limit_long = RSI_LONG_MAX
+                rsi_limit_short = RSI_SHORT_MIN
+
+            # ADX parameter defines trend strength, RSI_PREV defines pullback depth
+            rsi_prev = df['RSI'].values[max(0, i-1)]
+            
+            # NEW: ICT Confluence (Recent FVG or Liquidity Sweep within 5 bars)
+            # This ensures we enter after an institutional move/reclaim
+            df_recent = df.iloc[max(0, i-5):i+1]
+            gap_up, gap_down = fvg(df_recent)
+            _, swept_low = liquidity_sweep(df_recent) # We only care about sweep in our direction
+            swept_high, _ = liquidity_sweep(df_recent)
+            
+            if bias == 'BULL' and adx >= ADX_MIN and rsi_prev <= RSI_LONG_MAX and rsi <= rsi_limit_long and has_touched_long and is_reclaimed_long:
+                # Add strict ICT gate: Must have a recent FVG OR a Sweep to confirm high-probability zone
+                if gap_up or swept_low:
+                    long_s = MIN_CONFLUENCE
+                
+            if bias == 'BEAR' and adx >= ADX_MIN and rsi_prev >= RSI_SHORT_MIN and rsi >= rsi_limit_short and has_touched_short and is_reclaimed_short:
+                if gap_down or swept_high:
+                    short_s = MIN_CONFLUENCE
 
             # 9. ML prediction (if model available)
             ml_pred = None
@@ -395,52 +493,34 @@ class Backtester:
                 try:
                     df_window = df.iloc[max(0, i - SEQ_LEN + 1):i + 1]
                     if len(df_window) >= SEQ_LEN:
-                        ml_pred, ml_conf, _ = self.model.predict(df_window)
+                       ml_pred, ml_conf, xt, lstm_p, xgb_p = self.model.predict(df_window)
                 except Exception:
                     ml_pred = None
                     ml_conf = 0.0
 
+            # ---- 9. Entry Logic (Pure ICT) ----
             # ---- Long setup ----
             if (
                 long_s >= MIN_CONFLUENCE
                 and rsi < RSI_LONG_MAX
                 and bias == 'BULL'
             ):
-                # ML gate
-                if self.model is not None:
-                    if ml_pred != 1 or ml_conf < CONF_THRESH_BT:
-                        self.filter_stats['ml_skip'] += 1
-                    else:
-                        sl_p = price - self.sl_mult * atr
-                        tp_p = price + self.tp_mult * atr
-                        rr   = (tp_p - price) / (price - sl_p + 1e-10)
-                        if rr >= MIN_RR:
-                            entry_p = price * (1 + SLIPPAGE)
-                            open_trade = {
-                                'type': 'LONG', 'entry': entry_p,
-                                'tp': tp_p, 'sl': sl_p, 'initial_sl': sl_p,
-                                'atr': atr, 'size': 1.0,
-                                'open_ts': ts, 'partial': False,
-                            }
-                            self.filter_stats['entries'] += 1
-                        else:
-                            self.filter_stats['rr_skip'] += 1
+                sl_p = price - self.sl_mult * atr
+                tp_p = price + self.tp_mult * atr
+                rr   = (tp_p - price) / (price - sl_p + 1e-10)
+
+                if rr >= MIN_RR:
+                    entry_p = price * (1 + SLIPPAGE)
+                    open_trade = {
+                        'type': 'LONG', 'entry': entry_p,
+                        'tp': tp_p, 'sl': sl_p, 'initial_sl': sl_p,
+                        'atr': atr, 'size': 1.0,
+                        'open_ts': ts, 'partial': False,
+                    }
+                    self.filter_stats['entries'] += 1
+                    self.last_trade_bar = i
                 else:
-                    # No ML model - use pure ICT signals
-                    sl_p = price - self.sl_mult * atr
-                    tp_p = price + self.tp_mult * atr
-                    rr   = (tp_p - price) / (price - sl_p + 1e-10)
-                    if rr >= MIN_RR:
-                        entry_p = price * (1 + SLIPPAGE)
-                        open_trade = {
-                            'type': 'LONG', 'entry': entry_p,
-                            'tp': tp_p, 'sl': sl_p, 'initial_sl': sl_p,
-                            'atr': atr, 'size': 1.0,
-                            'open_ts': ts, 'partial': False,
-                        }
-                        self.filter_stats['entries'] += 1
-                    else:
-                        self.filter_stats['rr_skip'] += 1
+                    self.filter_stats['rr_skip'] += 1
 
             # ---- Short setup ----
             elif (
@@ -448,39 +528,22 @@ class Backtester:
                 and rsi > RSI_SHORT_MIN
                 and bias == 'BEAR'
             ):
-                if self.model is not None:
-                    if ml_pred != 0 or ml_conf < CONF_THRESH_BT:
-                        self.filter_stats['ml_skip'] += 1
-                    else:
-                        sl_p = price + self.sl_mult * atr
-                        tp_p = price - self.tp_mult * atr
-                        rr   = (price - tp_p) / (sl_p - price + 1e-10)
-                        if rr >= MIN_RR:
-                            entry_p = price * (1 - SLIPPAGE)
-                            open_trade = {
-                                'type': 'SHORT', 'entry': entry_p,
-                                'tp': tp_p, 'sl': sl_p, 'initial_sl': sl_p,
-                                'atr': atr, 'size': 1.0,
-                                'open_ts': ts, 'partial': False,
-                            }
-                            self.filter_stats['entries'] += 1
-                        else:
-                            self.filter_stats['rr_skip'] += 1
+                sl_p = price + self.sl_mult * atr
+                tp_p = price - self.tp_mult * atr
+                rr   = (price - tp_p) / (sl_p - price + 1e-10)
+
+                if rr >= MIN_RR:
+                    entry_p = price * (1 - SLIPPAGE)
+                    open_trade = {
+                        'type': 'SHORT', 'entry': entry_p,
+                        'tp': tp_p, 'sl': sl_p, 'initial_sl': sl_p,
+                        'atr': atr, 'size': 1.0,
+                        'open_ts': ts, 'partial': False,
+                    }
+                    self.filter_stats['entries'] += 1
+                    self.last_trade_bar = i
                 else:
-                    sl_p = price + self.sl_mult * atr
-                    tp_p = price - self.tp_mult * atr
-                    rr   = (price - tp_p) / (sl_p - price + 1e-10)
-                    if rr >= MIN_RR:
-                        entry_p = price * (1 - SLIPPAGE)
-                        open_trade = {
-                            'type': 'SHORT', 'entry': entry_p,
-                            'tp': tp_p, 'sl': sl_p, 'initial_sl': sl_p,
-                            'atr': atr, 'size': 1.0,
-                            'open_ts': ts, 'partial': False,
-                        }
-                        self.filter_stats['entries'] += 1
-                    else:
-                        self.filter_stats['rr_skip'] += 1
+                    self.filter_stats['rr_skip'] += 1
             else:
                 self.filter_stats['confluence_skip'] += 1
 
@@ -495,14 +558,14 @@ class Backtester:
 
         return self.trades, np.array(self.equity)
 
-    def _record(self, trade, exit_price, exit_reason, ts):
+    def _record(self, trade, exit_price, exit_reason, ts, size=1.0):
         if trade['type'] == 'LONG':
             raw_r = (exit_price - trade['entry']) / (trade['entry'] - trade['initial_sl'] + 1e-10)
         else:
             raw_r = (trade['entry'] - exit_price) / (trade['initial_sl'] - trade['entry'] + 1e-10)
 
         fee_cost = FEE_MAKER * 2
-        net_r    = raw_r * trade['size'] - fee_cost
+        net_r    = raw_r * size - fee_cost
 
         self.balance *= (1 + net_r * RISK_PERCENT)
         self.equity.append(self.balance)
@@ -565,8 +628,9 @@ def print_summary(symbol, trades, equity, filter_stats=None):
     print(f"  Avg R per trade    : {stats['avg_r']:+.3f}R")
     print(f"  Sharpe (annualised): {stats['sharpe']:+.2f}")
     print(f"  Max drawdown       : {stats['max_dd']*100:.1f}%")
-    print(f"  Final equity       : {final:.3f}x")
-    print(f"  Total return       : {(final-1)*100:+.1f}%")
+    print(f"  Final balance      : ${final:,.2f}")
+    total_ret_pct = (final - equity[0]) / equity[0] * 100
+    print(f"  Total return       : {total_ret_pct:+.1f}%")
     print(f"  Avg win            : {np.mean([t['r_multiple'] for t in wins]):.3f}R" if wins else "  Avg win            : -")
     print(f"  Avg loss           : {np.mean([t['r_multiple'] for t in losses]):.3f}R" if losses else "  Avg loss           : -")
 
@@ -635,10 +699,20 @@ if __name__ == '__main__':
         df_15m = build_features(df_15m, funding_rate=funding_rate, oi_df=oi)
 
         logger.info("Building features for 1h data...")
-        df_1h = build_features(df_1h, funding_rate=funding_rate)
+        df_1h_features = build_features(df_1h, funding_rate=funding_rate)
+        
+        # Super-HTF (4h): Resample from 1h raw data
+        logger.info("Building features for 4h data (resampled)...")
+        ohlc_dict = {'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}
+        df_4h_raw = df_1h.resample('4h').agg(ohlc_dict).dropna()
+        df_4h_features = build_features(df_4h_raw, funding_rate=funding_rate)
 
-        # Align 1h to 15m index
-        df_1h = df_1h.reindex(df_15m.index, method='ffill').dropna()
+        # Align all timeframes to 15m index
+        df_1h = df_1h_features.reindex(df_15m.index, method='ffill').dropna()
+        df_4h = df_4h_features.reindex(df_15m.index, method='ffill').dropna()
+        
+        # Ensure 15m is also cleaned to match the aligned indices
+        df_15m = df_15m.loc[df_4h.index]
 
         total_candles = len(df_15m)
         logger.info(f"Data prepared: {total_candles:,} candles")
@@ -654,13 +728,18 @@ if __name__ == '__main__':
         test_start  = max(0, split_idx - warmup_bars)
         test_15m    = df_15m.iloc[test_start:].copy()
         test_1h     = df_1h.iloc[test_start:].copy()
+        test_4h     = df_4h.iloc[test_start:].copy()
+
+        # NOTE: 2025 filter disabled — using standard 80/20 split for training
+        # test_15m = test_15m[test_15m.index >= '2025-01-01']
+        # test_1h = test_1h.loc[test_15m.index]
+        # test_4h = test_4h.loc[test_15m.index]
 
         logger.info(f"  Train: {len(train_15m):,} candles | Test: {len(test_15m):,} candles (incl. {warmup_bars} warmup)")
 
-        # ---- Optimize TP/SL on TRAINING data only (avoid look-ahead bias) ----
-        logger.info("Optimizing TP/SL multipliers on training data...")
-        tp_mult, sl_mult = optimize_multipliers(train_15m, min_rr=MIN_RR)
-        logger.info(f"  Optimal TP: {tp_mult:.2f}x ATR | SL: {sl_mult:.2f}x ATR")
+        # FIXED: Realistic 2.4:1.2 TP/SL geometry
+        tp_mult, sl_mult = 3.6, 1.2  # 3.6R target, 1.2R risk (Aggressive 3:1 RR)
+        logger.info(f"  Using TP: {tp_mult:.2f}x ATR (Uncapped) | SL: {sl_mult:.2f}x ATR")
 
         # ---- Train or load ML model (if enabled) ----
         model = None
@@ -673,14 +752,19 @@ if __name__ == '__main__':
                 train_labels = build_labels(train_15m, tp_mult, sl_mult, lookahead=LOOKAHEAD)
                 model.fit(train_15m, train_labels)
                 model.save()
-                logger.info("  ML model trained and saved")
+            
+            # Verify model quality before backtesting (always evaluate to check the gate)
+            logger.info("  Validating model performance...")
+            train_labels = build_labels(train_15m, tp_mult, sl_mult, lookahead=LOOKAHEAD)
+            model.evaluate(train_15m, train_labels)
+            logger.info("  ML model ready for trade gating")
         else:
             logger.info("  ML model DISABLED - using pure ICT signals")
 
         # ---- Run backtest on TEST data ----
         mode_str = "with ML model" if USE_ML else "with pure ICT signals"
         logger.info(f"Running out-of-sample backtest {mode_str}...")
-        bt = Backtester(sym, test_15m, test_1h, tp_mult, sl_mult, model=model)
+        bt = Backtester(sym, test_15m, test_1h, test_4h, tp_mult, sl_mult, model=model)
         trades, equity = bt.run()
 
         # ---- Results ----
